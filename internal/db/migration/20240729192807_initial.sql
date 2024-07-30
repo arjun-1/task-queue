@@ -18,6 +18,10 @@ CREATE TABLE task (
   queue text NOT NULL
 );
 
+CREATE INDEX idx_task_fetch ON task (state, queue, scheduled_at, priority, id);
+
+CREATE INDEX idx_task_id_state ON task (id, state);
+
 
 -- migrate:down
 

@@ -50,7 +50,7 @@ func NewQueue(name string, queries *db.Queries, fetchInterval time.Duration) Que
 // Start begins the consumption of tasks in the queue. It begins
 // two independent loops: the fetching of records and handling of the result.
 func (q *Queue) Start(ctx context.Context) error {
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 1)
 
 	go func() {
 		if err := q.fetchTaskLoop(ctx); err != nil {
@@ -69,7 +69,12 @@ func (q *Queue) Start(ctx context.Context) error {
 	}
 
 	return nil
+}
 
+func AddHandler[T any](kind string, q *Queue, handler TaskHandler[T]) error {
+	q.kindToWorkerGen[kind] = MakeWorker(handler)
+
+	return nil
 }
 
 func (q *Queue) handleTaskLoop(ctx context.Context) error {
@@ -83,49 +88,10 @@ func (q *Queue) handleTaskLoop(ctx context.Context) error {
 			go func(task db.Task) {
 				defer func() { <-semaphore }()
 
-				q.numWorkers.Add(1)
-				defer q.numWorkers.Add(-1)
-
-				makeWorker := q.kindToWorkerGen[task.Kind]
-				worker := makeWorker(task)
-
-				fmt.Printf("spawned worker for task (ID: %d)\n", task.ID)
-
-				if err := worker.UnmarshalPayload(); err != nil {
-					errCh <- fmt.Errorf("failed to unmarshal payload: %w", err)
-					return
+				if err := q.handleTask(ctx, task); err != nil {
+					errCh <- err
 				}
 
-				if err := worker.Handle(ctx); err != nil {
-					retryConfig := worker.RetryConfig()
-
-					if int(task.Attempt)+1 > retryConfig.MaxAttempts {
-						fmt.Printf("failed task (ID: %d)\n", task.ID)
-						if err := q.queries.TaskFail(ctx, db.TaskFailParams{ID: task.ID, Err: err.Error()}); err != nil {
-							errCh <- fmt.Errorf("failed to persist task fail: %w", err)
-						}
-						return
-					}
-
-					delay := retryConfig.Delay(task, err)
-					fmt.Printf("retrying task (ID: %d, error: %s)\n", task.ID, err.Error())
-					if err := q.queries.TaskRetry(
-						ctx,
-						db.TaskRetryParams{
-							ID:          task.ID,
-							Err:         err.Error(),
-							Scheduledat: pgtype.Timestamptz{Valid: true, Time: time.Now().Add(delay)},
-						},
-					); err != nil {
-						errCh <- fmt.Errorf("failed to persist task retry: %w", err)
-					}
-					return
-				}
-
-				fmt.Printf("completed task (ID: %d)\n", task.ID)
-				if err := q.queries.TaskComplete(ctx, task.ID); err != nil {
-					errCh <- fmt.Errorf("failed to persist task complete: %w", err)
-				}
 			}(task)
 		}
 	}()
@@ -137,6 +103,54 @@ func (q *Queue) handleTaskLoop(ctx context.Context) error {
 	return nil
 }
 
+func (q *Queue) handleTask(ctx context.Context, task db.Task) error {
+	q.numWorkers.Add(1)
+	defer q.numWorkers.Add(-1)
+
+	makeWorker := q.kindToWorkerGen[task.Kind]
+	worker := makeWorker(task)
+
+	fmt.Printf("spawned worker for task (ID: %d)\n", task.ID)
+
+	if err := worker.UnmarshalPayload(); err != nil {
+		fmt.Printf("failed to unmarshal payload: %s\n", err.Error())
+		return nil
+	}
+
+	if err := worker.Handle(ctx); err != nil {
+		retryConfig := worker.RetryConfig()
+
+		if int(task.Attempt)+1 > retryConfig.MaxAttempts {
+			fmt.Printf("failed task (ID: %d)\n", task.ID)
+			if _, err := q.queries.TaskFail(ctx, db.TaskFailParams{ID: task.ID, Err: err.Error()}); err != nil {
+				return fmt.Errorf("failed to persist task fail: %w", err)
+			}
+			return nil
+		}
+
+		delay := retryConfig.Delay(task, err)
+		fmt.Printf("retrying task (ID: %d, error: %s)\n", task.ID, err.Error())
+		if _, err := q.queries.TaskRetry(
+			ctx,
+			db.TaskRetryParams{
+				ID:          task.ID,
+				Err:         err.Error(),
+				Scheduledat: pgtype.Timestamptz{Valid: true, Time: time.Now().Add(delay)},
+			},
+		); err != nil {
+			return fmt.Errorf("failed to persist task retry: %w", err)
+		}
+		return nil
+	}
+
+	fmt.Printf("completed task (ID: %d)\n", task.ID)
+	if _, err := q.queries.TaskComplete(ctx, task.ID); err != nil {
+		return fmt.Errorf("failed to persist task complete: %w", err)
+	}
+	return nil
+}
+
+// fetchTaskLoop fetches available tasks with backpressure at fetchInterval.
 func (q *Queue) fetchTaskLoop(ctx context.Context) error {
 	ticker := time.NewTicker(q.fetchInterval)
 	defer ticker.Stop()
@@ -158,12 +172,6 @@ func (q *Queue) fetchTaskLoop(ctx context.Context) error {
 			q.fetchedTaskCh <- t
 		}
 	}
-
-	return nil
-}
-
-func AddHandler[T any](kind string, q *Queue, handler TaskHandler[T]) error {
-	q.kindToWorkerGen[kind] = MakeWorker(handler)
 
 	return nil
 }

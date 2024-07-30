@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"time"
 
 	queue "github.com/arjun-1/task-queue"
@@ -13,18 +12,14 @@ import (
 
 func main() {
 	ctx := context.Background()
+	connStr := "postgresql://postgres:postgres@localhost:5432/postgres?sslmode=disable"
 
-	config, err := queue.AppConfigFromEnv(ctx)
+	pgxPool, err := queue.NewDBPool(ctx, connStr)
 	if err != nil {
 		panic(err)
 	}
 
-	pgxPool, err := queue.NewDBPool(ctx, config.PostgresURL.String())
-	if err != nil {
-		panic(err)
-	}
-
-	if err := queue.Migrate(config.PostgresURL.String()); err != nil {
+	if err := queue.Migrate(connStr); err != nil {
 		panic(err)
 	}
 
@@ -33,21 +28,22 @@ func main() {
 	q := queue.NewQueue("my-queue", queries, 1*time.Second)
 
 	queue.AddHandler(
-		"string",
+		"my-kind",
 		&q,
 		queue.TaskHandler[string]{
 			Handler: func(ctx context.Context, t queue.Task[string]) error {
-				// sleep anywhere between 3 and 7 seconds
-				time.Sleep(time.Duration(rand.Intn(3)+4) * time.Second)
-
-				fmt.Printf("done: %s\n", t.TypedPayload)
+				if t.Priority == 0 {
+					time.Sleep(5 * time.Second)
+				} else {
+					time.Sleep(1 * time.Second)
+				}
 
 				return nil
 			},
 		},
 	)
 
-	for i := range 20 {
+	for i := range 2 {
 		payload, err := json.Marshal(fmt.Sprintf("\"hello world!: %d\"", i))
 		if err != nil {
 			panic(err)
@@ -55,7 +51,7 @@ func main() {
 
 		task, err := queries.TaskInsert(
 			ctx,
-			db.TaskInsertParams{Payload: payload, Kind: "string", Queue: "my-queue"},
+			db.TaskInsertParams{Payload: payload, Kind: "my-kind", Queue: "my-queue", Priority: int32(-i)},
 		)
 		if err != nil {
 			panic(err)

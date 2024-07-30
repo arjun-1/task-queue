@@ -5,13 +5,13 @@ WITH
     FROM task
     WHERE
       state = 'available'
-      AND queue = @queue::text
+      AND queue = sqlc.arg(queue)::text
       AND scheduled_at <= now()
     ORDER BY
       priority ASC,
       scheduled_at ASC,
       id ASC
-    LIMIT @max::integer
+    LIMIT sqlc.arg(max)::integer
     FOR UPDATE SKIP LOCKED
   )
 UPDATE task
@@ -24,64 +24,54 @@ WHERE task.id = locked_tasks.id
 RETURNING task.*;
 
 
--- name: TaskComplete :exec
+-- name: TaskComplete :one
 WITH locked_task AS (
   SELECT id
   FROM task
-  WHERE id = @id::bigint 
+  WHERE id = sqlc.arg(id)::bigint 
   FOR UPDATE
-),
-updated_task AS (
-  UPDATE task
-  SET
-    state = 'completed'::task_state,
-    ended_at = now()
-  FROM locked_task
-  WHERE task.id = locked_task.id AND task.state = 'running'
-  RETURNING task.*
 )
-SELECT * FROM updated_task;
+UPDATE task
+SET
+  state = 'completed'::task_state,
+  ended_at = now()
+FROM locked_task
+WHERE task.id = locked_task.id AND task.state = 'running'
+RETURNING task.*;
 
--- name: TaskFail :exec
+-- name: TaskFail :one
 WITH locked_task AS (
   SELECT id
   FROM task
-  WHERE id = @id::bigint 
+  WHERE id = sqlc.arg(id)::bigint 
   FOR UPDATE
-),
-updated_task AS (
-  UPDATE task
-  SET
-    state = 'failed'::task_state,
-    error = sqlc.arg(err)::text,
-    ended_at = now()
-  FROM locked_task
-  WHERE task.id = locked_task.id AND task.state = 'running'
-  RETURNING task.*
 )
-SELECT * FROM updated_task;
+UPDATE task
+SET
+  state = 'failed'::task_state,
+  error = sqlc.arg(err)::text,
+  ended_at = now()
+FROM locked_task
+WHERE task.id = locked_task.id AND task.state = 'running'
+RETURNING task.*;
 
--- name: TaskRetry :exec
+-- name: TaskRetry :one
 WITH locked_task AS (
   SELECT id
   FROM task
-  WHERE id = @id::bigint 
+  WHERE id = sqlc.arg(id)::bigint 
   FOR UPDATE
-),
-updated_task AS (
-  UPDATE task
-  SET
-    state = 'available'::task_state,
-    error = sqlc.arg(err)::text,
-    scheduled_at = sqlc.arg(scheduledAt)::timestamptz
-  FROM locked_task
-  WHERE task.id = locked_task.id AND task.state = 'running'
-  RETURNING task.*
 )
-SELECT * FROM updated_task;
+UPDATE task
+SET
+  state = 'available'::task_state,
+  error = sqlc.arg(err)::text,
+  scheduled_at = sqlc.arg(scheduledAt)::timestamptz
+FROM locked_task
+WHERE task.id = locked_task.id AND task.state = 'running'
+RETURNING task.*;
 
-
--- name: TaskInsert :exec
+-- name: TaskInsert :one
 INSERT INTO task(
     state,
     payload,

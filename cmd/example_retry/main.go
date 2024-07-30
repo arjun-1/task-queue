@@ -50,13 +50,15 @@ func main() {
 			panic(err)
 		}
 
-		fmt.Printf("inserting task (ID: %d)\n", i)
-		if err := queries.TaskInsert(
+		task, err := queries.TaskInsert(
 			ctx,
 			db.TaskInsertParams{Payload: payload, Kind: "string", Queue: "my-queue"},
-		); err != nil {
+		)
+		if err != nil {
 			panic(err)
 		}
+
+		fmt.Printf("inserting task (ID: %d)\n", task.ID)
 	}
 
 	if err := q.Start(ctx); err != nil {
