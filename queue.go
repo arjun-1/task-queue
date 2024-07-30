@@ -30,10 +30,10 @@ type Queue struct {
 	fetchInterval   time.Duration
 	fetchedTaskCh   chan db.Task
 
-	queries *db.Queries
+	querier db.Querier
 }
 
-func NewQueue(name string, queries *db.Queries, fetchInterval time.Duration) Queue {
+func NewQueue(name string, querier db.Querier, fetchInterval time.Duration) Queue {
 	fetchBufferSize := 10
 
 	return Queue{
@@ -43,7 +43,7 @@ func NewQueue(name string, queries *db.Queries, fetchInterval time.Duration) Que
 		fetchInterval:   fetchInterval,
 		kindToWorkerGen: make(map[string]func(db.Task) Worker),
 		fetchedTaskCh:   make(chan db.Task, fetchBufferSize),
-		queries:         queries,
+		querier:         querier,
 	}
 }
 
@@ -112,40 +112,50 @@ func (q *Queue) handleTask(ctx context.Context, task db.Task) error {
 
 	fmt.Printf("spawned worker for task (ID: %d)\n", task.ID)
 
+	retryConfig := worker.RetryConfig()
+
 	if err := worker.UnmarshalPayload(); err != nil {
 		fmt.Printf("failed to unmarshal payload: %s\n", err.Error())
+		if retryErr := q.retry(ctx, task, retryConfig, err); retryErr != nil {
+			return retryErr
+		}
 		return nil
 	}
 
 	if err := worker.Handle(ctx); err != nil {
-		retryConfig := worker.RetryConfig()
-
-		if int(task.Attempt)+1 > retryConfig.MaxAttempts {
-			fmt.Printf("failed task (ID: %d)\n", task.ID)
-			if _, err := q.queries.TaskFail(ctx, db.TaskFailParams{ID: task.ID, Err: err.Error()}); err != nil {
-				return fmt.Errorf("failed to persist task fail: %w", err)
-			}
-			return nil
+		fmt.Printf("failed to handle: %s\n", err.Error())
+		if retryErr := q.retry(ctx, task, retryConfig, err); retryErr != nil {
+			return retryErr
 		}
+	}
 
-		delay := retryConfig.Delay(task, err)
-		fmt.Printf("retrying task (ID: %d, error: %s)\n", task.ID, err.Error())
-		if _, err := q.queries.TaskRetry(
-			ctx,
-			db.TaskRetryParams{
-				ID:          task.ID,
-				Err:         err.Error(),
-				Scheduledat: pgtype.Timestamptz{Valid: true, Time: time.Now().Add(delay)},
-			},
-		); err != nil {
-			return fmt.Errorf("failed to persist task retry: %w", err)
+	fmt.Printf("completed task (ID: %d)\n", task.ID)
+	if _, err := q.querier.TaskComplete(ctx, task.ID); err != nil {
+		return fmt.Errorf("failed to persist task complete: %w", err)
+	}
+	return nil
+}
+
+func (q *Queue) retry(ctx context.Context, task db.Task, retryConfig RetryConfig, err error) error {
+	if int(task.Attempt)+1 > retryConfig.MaxAttempts {
+		fmt.Printf("failed task (ID: %d)\n", task.ID)
+		if _, querierErr := q.querier.TaskFail(ctx, db.TaskFailParams{ID: task.ID, Err: err.Error()}); err != nil {
+			return fmt.Errorf("failed to persist task fail: %w", querierErr)
 		}
 		return nil
 	}
 
-	fmt.Printf("completed task (ID: %d)\n", task.ID)
-	if _, err := q.queries.TaskComplete(ctx, task.ID); err != nil {
-		return fmt.Errorf("failed to persist task complete: %w", err)
+	delay := retryConfig.Delay(task, err)
+	fmt.Printf("retrying task (ID: %d, error: %s)\n", task.ID, err.Error())
+	if _, querierErr := q.querier.TaskRetry(
+		ctx,
+		db.TaskRetryParams{
+			ID:          task.ID,
+			Err:         err.Error(),
+			Scheduledat: pgtype.Timestamptz{Valid: true, Time: time.Now().Add(delay)},
+		},
+	); querierErr != nil {
+		return fmt.Errorf("failed to persist task retry: %w", querierErr)
 	}
 	return nil
 }
@@ -162,7 +172,7 @@ func (q *Queue) fetchTaskLoop(ctx context.Context) error {
 		limit := max(q.maxWorkers-numWorkers, q.fetchBufferSize-bufferSize)
 		fmt.Printf("fetching tasks (workers: %d, buffer: %d, limit: %d)\n", numWorkers, bufferSize, limit)
 
-		tasks, err := q.queries.TaskListAvailable(ctx, db.TaskListAvailableParams{Queue: q.name, Max: int32(limit)})
+		tasks, err := q.querier.TaskListAvailable(ctx, db.TaskListAvailableParams{Queue: q.name, Max: int32(limit)})
 		if err != nil {
 			return err
 		}

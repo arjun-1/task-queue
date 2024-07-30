@@ -13,14 +13,18 @@ import (
 
 func main() {
 	ctx := context.Background()
-	connStr := "postgresql://postgres:postgres@localhost:5432/postgres?sslmode=disable"
 
-	pgxPool, err := queue.NewDBPool(ctx, connStr)
+	config, err := queue.AppConfigFromEnv(ctx)
 	if err != nil {
 		panic(err)
 	}
 
-	if err := queue.Migrate(connStr); err != nil {
+	pgxPool, err := queue.NewDBPool(ctx, config.PostgresURL.String())
+	if err != nil {
+		panic(err)
+	}
+
+	if err := queue.Migrate(config.PostgresURL.String()); err != nil {
 		panic(err)
 	}
 

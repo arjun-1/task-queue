@@ -4,7 +4,7 @@ This project implements an asynchronous task queue backed by Postgres. The idea 
 
 They all exploit a recently new feature added to Postgres since 9.5: `SKIP LOCKED`. In combination with explicit locking `FOR UPDATE`. Essentially it allows attempting to acquire a lock on rows to be dequeued, and ignore any elements if it can't acquire any. This prevents issues that would have occured with transaction isolation: if 2 consumers would have dequeued at the same time, leading to 'lost update' problem.
 
-We use the same clause.
+The current project demonstrates an SDK allowing clients to easily connnect to any Postgres DB. But the project can be upgraded to a service, hiding the Postgres implementation.
 
 ## Usage
 
@@ -80,16 +80,3 @@ or manually (requiring a Postgres DB):
 ```bash
 go run cmd/example_many/main.go
 ```
-
-## Improvements
-
-Due to time restrictions, some shortcuts were taken leaving room for the following improvements:
-
-- In theory a task can become 'lost' if the application crashes leaving it permantly in a running state without it being worked on. This can be addressed by a rescue process, carried out by an elected leader among clients.
-- Not everywhere do we respect context cancellation.
-- Much of the configuration of a `Queue` is now hardcoded.
-- There is no API for inserting a task.
-- All the logic still resides in one package.
-- Only some part of the DB queries are tested leaving most of the domain logic
-  uncovered.
-- Testing spawns a postgres DB which is not reused between tests.
